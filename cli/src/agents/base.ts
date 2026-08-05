@@ -616,6 +616,15 @@ export class ACP {
 				acp.methods.agent.session.prompt,
 				params,
 			);
+			// ACP requires the agent to send its turn updates before replying to
+			// session/prompt, but the SDK resolves responses synchronously while it
+			// dispatches notifications through an async handler chain. Consequently
+			// the final assistant chunk can already be on the wire yet not have
+			// reached `transcript.apply()` here. Besides returning a stale result,
+			// that races the manager's turn-boundary SQLite write and leaves a cache
+			// containing only the user's message. Wait for the transport-tracked
+			// dispatch to finish, just as `loadSession()` does for replayed history.
+			await this.client.settled();
 			if (updateTasks.size > 0) {
 				await Promise.all(updateTasks);
 			}
@@ -856,17 +865,32 @@ export class ACP {
 		return result.data as T;
 	}
 
+	/**
+	 * Extra environment for this agent's subprocess, resolved at spawn time.
+	 *
+	 * Subclasses override this for values that can't be baked into the static
+	 * descriptor because they depend on the host's current state (installed
+	 * binaries, PATH). Merged over `descriptor.spawn.env`.
+	 */
+	protected spawnEnvOverride(): Record<string, string> | undefined {
+		return undefined;
+	}
+
 	protected spawnAgent() {
 		if (this.spawnedAgent) {
 			throw new Error("Agent process already spawned");
 		}
 
+		const extraEnv = this.spawnEnvOverride();
 		const spawnedAgent = ACP.spawnAgentProcess({
 			name: this.id,
 			agentExecutable: this.descriptor.agentExecutable,
 			command: this.descriptor.spawn.command,
 			args: this.descriptor.spawn.args,
-			env: this.descriptor.spawn.env,
+			env:
+				this.descriptor.spawn.env || extraEnv
+					? { ...this.descriptor.spawn.env, ...extraEnv }
+					: undefined,
 			cwd: this.descriptor.spawn.cwd,
 		});
 
